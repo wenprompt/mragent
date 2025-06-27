@@ -33,6 +33,10 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# inngest background jobs
+.inngest/
+.inngest/main.db
+
 # vercel
 .vercel
 
