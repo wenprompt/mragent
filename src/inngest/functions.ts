@@ -3,6 +3,7 @@ import {
   createAgent,
   createTool,
   createNetwork,
+  type Tool,
 } from "@inngest/agent-kit";
 import { Sandbox } from "@e2b/code-interpreter";
 import { z } from "zod";
@@ -10,17 +11,23 @@ import { z } from "zod";
 import { inngest } from "./client";
 import { getSandBox, lastAssistantTextMessageContent } from "./utils";
 import { PROMPT } from "@/prompt";
+import { prisma } from "@/lib/db";
 
-export const helloWorld = inngest.createFunction(
-  { id: "hello-world" },
-  { event: "test/hello.world" },
+interface AgentState {
+  summary: string;
+  files: { [path: string]: string };
+}
+
+export const codeAgentFunction = inngest.createFunction(
+  { id: "code-agent" },
+  { event: "code-agent/run" },
   async ({ event, step }) => {
     const sandboxId = await step.run("get-sandbox-id", async () => {
       const sandbox = await Sandbox.create("mragent-nextjs-test-2");
       return sandbox.sandboxId;
     });
     // Create a new agent with a system prompt (you can add optional tools, too)
-    const codeAgent = createAgent({
+    const codeAgent = createAgent<AgentState>({
       name: "code-agent",
       description: "An expert coding agent",
       system: PROMPT,
@@ -76,7 +83,10 @@ export const helloWorld = inngest.createFunction(
               })
             ),
           }),
-          handler: async ({ files }, { step, network }) => {
+          handler: async (
+            { files },
+            { step, network }: Tool.Options<AgentState>
+          ) => {
             // it will recognise the input it accepts and return an object
             const newFiles = await step?.run(
               "createOrUpdateFiles",
@@ -144,7 +154,7 @@ export const helloWorld = inngest.createFunction(
       },
     });
 
-    const network = createNetwork({
+    const network = createNetwork<AgentState>({
       name: " coding-agent-network",
       agents: [codeAgent],
       maxIter: 15,
@@ -161,11 +171,43 @@ export const helloWorld = inngest.createFunction(
     // Run the agent with the network
     const result = await network.run(event.data.value);
 
+    //something went wrong if this is missing
+    const isError =
+      !result.state.data.summary ||
+      Object.keys(result.state.data.files || {}).length === 0;
+
     const sandboxUrl = await step.run("get-sandbox-url", async () => {
       const sandbox = await getSandBox(sandboxId);
       //we set the host to port 3000, which is the default for Next.js apps
       const host = sandbox.getHost(3000);
       return `https://${host}`;
+    });
+
+    await step.run("save-result", async () => {
+      if (isError) {
+        //dont create the fragment if there is an error
+        return await prisma.message.create({
+          data: {
+            content: "Something went wrong. Please try again.",
+            role: "ASSISTANT",
+            type: "ERROR",
+          },
+        });
+      }
+      return await prisma.message.create({
+        data: {
+          content: result.state.data.summary,
+          role: "ASSISTANT",
+          type: "RESULT",
+          fragment: {
+            create: {
+              sandboxUrl: sandboxUrl,
+              title: "Fragment",
+              files: result.state.data.files,
+            },
+          },
+        },
+      });
     });
 
     return {
