@@ -1,0 +1,17 @@
+# This is a config for E2B sandbox template.
+# You can use template ID (hdbhmcw3v060bwxcyt1z) or template name (mragent-nextjs-test-2) to create a sandbox:
+
+# Python SDK
+# from e2b import Sandbox, AsyncSandbox
+# sandbox = Sandbox("mragent-nextjs-test-2") # Sync sandbox
+# sandbox = await AsyncSandbox.create("mragent-nextjs-test-2") # Async sandbox
+
+# JS SDK
+# import { Sandbox } from 'e2b'
+# const sandbox = await Sandbox.create('mragent-nextjs-test-2')
+
+team_id = "fabcccca-3c9e-4b1f-b039-a594693f58e5"
+start_cmd = "/compile_page.sh"
+dockerfile = "e2b.Dockerfile"
+template_name = "mragent-nextjs-test-2"
+template_id = "hdbhmcw3v060bwxcyt1z"
