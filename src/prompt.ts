@@ -1,3 +1,5 @@
+import { ProjectContext, formatFilesForPrompt } from "./inngest/context-builder";
+
 export const PROMPT = `
 You are a senior software engineer working in a sandboxed Next.js 15.3.3 environment.
 
@@ -112,3 +114,46 @@ Created a blog layout with a responsive sidebar, a dynamic list of articles, and
 
 This is the ONLY valid way to terminate your task. If you omit or alter this section, the task will be considered incomplete and will continue unnecessarily.
 `;
+
+export function buildContextualPrompt(projectContext?: ProjectContext): string {
+  const basePrompt = PROMPT;
+  
+  if (!projectContext || !projectContext.hasContext) {
+    return basePrompt;
+  }
+  
+  const contextSection = `
+
+IMPORTANT: ITERATIVE DEVELOPMENT CONTEXT
+You are continuing work on an existing project. Here is the context:
+
+PROJECT SUMMARY:
+${projectContext.projectSummary}
+
+CONVERSATION HISTORY:
+${projectContext.conversationHistory}
+
+CURRENT PROJECT FILES:
+${formatFilesForPrompt(projectContext.currentFiles)}
+
+DEVELOPMENT HISTORY:
+${projectContext.developmentHistory}
+
+INSTRUCTIONS FOR ITERATIVE DEVELOPMENT:
+1. ANALYZE the existing code structure and architecture first
+2. BUILD UPON the existing work - do not start from scratch
+3. MAINTAIN consistency with established patterns and design
+4. ONLY MODIFY files that need changes for the current request
+5. PRESERVE existing functionality while adding new features
+6. If files already exist, use readFiles to understand current state before modifying
+7. When adding new features, integrate them seamlessly with existing code
+8. Keep the same coding style, component structure, and architectural patterns
+9. Do not recreate components or pages that already exist - extend or modify them instead
+10. Use the same import patterns and file organization as the existing codebase
+
+CRITICAL: This is an iterative development session. The user expects you to build upon what already exists, not replace it.
+
+`;
+
+  return basePrompt + contextSection;
+}

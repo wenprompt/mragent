@@ -5,32 +5,66 @@ import {
   createNetwork,
   type Tool,
 } from "@inngest/agent-kit";
-import { Sandbox } from "@e2b/code-interpreter";
 import { z } from "zod";
 
 import { inngest } from "./client";
 import { getSandBox, lastAssistantTextMessageContent } from "./utils";
-import { PROMPT } from "@/prompt";
+import { buildContextualPrompt } from "@/prompt";
 import { prisma } from "@/lib/db";
+import { getOrCreateProjectSandbox, getLatestProjectFiles } from "./sandbox-manager";
+import { getProjectMessageHistory, buildProjectContext } from "./context-builder";
 
 interface AgentState {
   summary: string;
   files: { [path: string]: string };
 }
 
+function isSandboxError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  
+  const errorMessage = String(error).toLowerCase();
+  
+  // Check for common sandbox connection/timeout errors
+  return (
+    errorMessage.includes('unexpected eof') ||
+    errorMessage.includes('connection refused') ||
+    errorMessage.includes('connection reset') ||
+    errorMessage.includes('sandbox not found') ||
+    errorMessage.includes('timeout') ||
+    errorMessage.includes('econnreset') ||
+    errorMessage.includes('enotfound') ||
+    errorMessage.includes('network error') ||
+    errorMessage.includes('502 bad gateway') ||
+    errorMessage.includes('503 service unavailable') ||
+    errorMessage.includes('504 gateway timeout')
+  );
+}
+
 export const codeAgentFunction = inngest.createFunction(
   { id: "code-agent" },
   { event: "code-agent/run" },
   async ({ event, step }) => {
-    const sandboxId = await step.run("get-sandbox-id", async () => {
-      const sandbox = await Sandbox.create("mragent-nextjs-test-2");
-      return sandbox.sandboxId;
+    const projectId = event.data.projectId;
+    
+    // Get message history and build context
+    const projectContext = await step.run("build-context", async () => {
+      const messages = await getProjectMessageHistory(projectId);
+      const context = buildProjectContext(messages);
+      return context;
     });
-    // Create a new agent with a system prompt (you can add optional tools, too)
+    
+    // Get or create sandbox with previous files if they exist
+    const { sandboxId, isReused } = await step.run("get-or-create-sandbox", async () => {
+      const previousFiles = projectContext.hasContext ? projectContext.currentFiles : await getLatestProjectFiles(projectId);
+      return await getOrCreateProjectSandbox(projectId, previousFiles);
+    });
+    
+    console.log(`Using sandbox ${sandboxId} (reused: ${isReused}) for project ${projectId}`);
+    // Create a new agent with contextual prompt
     const codeAgent = createAgent<AgentState>({
       name: "code-agent",
       description: "An expert coding agent",
-      system: PROMPT,
+      system: buildContextualPrompt(projectContext),
       model: openai({
         model: "gpt-4.1",
         //temperature might not exist for non chatgpt models
@@ -63,11 +97,16 @@ export const codeAgentFunction = inngest.createFunction(
                 return result.stdout;
               } catch (e) {
                 console.error(
-                  `Command failed: ${e} \nstout: ${buffers.stdout} \nstderr: ${buffers.stderr}`
+                  `Terminal command failed: ${e} \nstdout: ${buffers.stdout} \nstderr: ${buffers.stderr}`
                 );
 
+                // Check if it's a sandbox connection error
+                if (isSandboxError(e)) {
+                  return `Sandbox connection lost. The environment may have timed out. Please retry your request.`;
+                }
+
                 //inngest will automatically retry the function if it fails with the context of the error
-                return `Command failed: ${e} \nstout: ${buffers.stdout} \nstderr: ${buffers.stderr}`;
+                return `Command failed: ${e} \nstdout: ${buffers.stdout} \nstderr: ${buffers.stderr}`;
               }
             });
           },
@@ -102,6 +141,10 @@ export const codeAgentFunction = inngest.createFunction(
 
                   return updatedFiles;
                 } catch (e) {
+                  console.error("File write error:", e);
+                  if (isSandboxError(e)) {
+                    return "Sandbox connection lost. The environment may have timed out. Please retry your request.";
+                  }
                   return "Error: " + e;
                 }
               }
@@ -130,6 +173,10 @@ export const codeAgentFunction = inngest.createFunction(
                 }
                 return JSON.stringify(contents);
               } catch (e) {
+                console.error("File read error:", e);
+                if (isSandboxError(e)) {
+                  return "Sandbox connection lost. The environment may have timed out. Please retry your request.";
+                }
                 return "Error reading files: " + e;
               }
             });
@@ -159,6 +206,11 @@ export const codeAgentFunction = inngest.createFunction(
       agents: [codeAgent],
       maxIter: 15,
       router: async ({ network }) => {
+        // Initialize with existing files if context exists (only on first call)
+        if (projectContext.hasContext && !network.state.data.files) {
+          network.state.data.files = projectContext.currentFiles;
+        }
+        
         const summary = network.state.data.summary;
         if (summary) {
           return;
@@ -167,9 +219,32 @@ export const codeAgentFunction = inngest.createFunction(
         return codeAgent;
       },
     });
-    // await step.sleep("wait-a-moment", "10s");
-    // Run the agent with the network
-    const result = await network.run(event.data.value);
+    // Run the agent with the network with sandbox error handling
+    let result;
+    try {
+      result = await network.run(event.data.value);
+    } catch (error) {
+      console.error("Agent execution failed:", error);
+      
+      // Check if it's a sandbox-related error
+      if (isSandboxError(error)) {
+        console.log("Detected sandbox timeout/connection error, returning graceful error message");
+        
+        return await step.run("save-sandbox-error", async () => {
+          return await prisma.message.create({
+            data: {
+              projectId: event.data.projectId,
+              content: "The sandbox environment has timed out or lost connection. Please try sending your message again to continue development with a fresh environment.",
+              role: "ASSISTANT",
+              type: "ERROR",
+            },
+          });
+        });
+      }
+      
+      // Re-throw non-sandbox errors
+      throw error;
+    }
 
     //something went wrong if this is missing
     const isError =
